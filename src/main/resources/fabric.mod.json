@@ -1,0 +1,37 @@
+{
+	"schemaVersion": 1,
+	"id": "smile_libbox",
+	"version": "${version}",
+	"name": "Smile's Lib Box",
+	"description": "按游戏版本分发的跨版本转译层：每个 jar 用对应版本的 Minecraft 编译适配实现与 mixin，向上暴露一套固定 API，让依赖它的模组只需一个 jar。",
+	"authors": [
+		"Me!"
+	],
+	"license": "CC0-1.0",
+	"icon": "assets/smile_libbox/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"smile_libbox.SmileSLibBox"
+		],
+		"client": [
+			"smile_libbox.client.SmileSLibBoxClient"
+		]
+	},
+	"mixins": [
+		"smile_libbox.mixins.json",
+		{
+			"config": "smile_libbox.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.20.1",
+		"minecraft": "${minecraft_range}",
+		"java": "${java_range}",
+		"fabric-api": "*"
+	},
+	"custom": {
+		"libbox_target": "${target_version}"
+	}
+}

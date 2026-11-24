@@ -1,0 +1,77 @@
+plugins {
+	// 每个版本子工程都会应用一次这个共享脚本。
+	// Loom 版本写死在这里：plugins {} 块读不到 gradle.properties。
+	id 'net.fabricmc.fabric-loom-remap' version '1.19-SNAPSHOT'
+	id 'maven-publish'
+}
+
+// ---------------------------------------------------------------------------
+// 当前正在构建的版本节点（由 Stonecutter 注入）
+// ---------------------------------------------------------------------------
+def mcVersion = stonecutter.current.version
+def javaRelease = (property('deps.java_release') as String).toInteger()
+def modId = property('mod.id')
+
+version = "${property('mod.version')}+${mcVersion}"
+group = property('mod.group')
+base.archivesName = property('mod.id')
+
+loom {
+	splitEnvironmentSourceSets()
+
+	mods {
+		"smile_libbox" {
+			sourceSet sourceSets.main
+			sourceSet sourceSets.client
+		}
+	}
+}
+
+dependencies {
+	// 关键：适配层与 mixin 用本节点的 MC 编译，refmap 天然对应这个版本
+	minecraft "com.mojang:minecraft:${mcVersion}"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${property('deps.fabric_loader')}"
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${property('deps.fabric_api')}"
+}
+
+// 每个 jar 声明自己服务的游戏版本，并写入供 LibBoxMixinPlugin 校验的目标版本
+def replaceMeta = [
+		version         : project.version,
+		minecraft_range : property('deps.minecraft_range'),
+		java_range      : property('deps.java_range'),
+		target_version  : mcVersion
+]
+
+processResources {
+	inputs.properties(replaceMeta)
+
+	filesMatching(["fabric.mod.json", "libbox-target.txt"]) {
+		expand(replaceMeta)
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = javaRelease
+	it.options.encoding = 'UTF-8'
+}
+
+java {
+	sourceCompatibility = JavaVersion.toVersion(javaRelease)
+	targetCompatibility = JavaVersion.toVersion(javaRelease)
+}
+
+jar {
+	from("LICENSE") {
+		rename { "${it}_$modId" }
+	}
+}
+
+publishing {
+	publications {
+		create("mavenJava", MavenPublication) {
+			from components.java
+			artifactId = "smile_libbox"
+		}
+	}
+}

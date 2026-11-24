@@ -1,0 +1,45 @@
+# gradle
+
+.gradle/
+build/
+out/
+classes/
+
+# eclipse
+
+*.launch
+
+# idea
+
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# vscode
+
+.settings/
+.vscode/
+bin/
+.classpath
+.project
+
+# macos
+
+*.DS_Store
+
+# fabric
+
+run/
+
+# 构建 / 验证的临时日志（named26/build 已由上面的 build/ 规则覆盖）
+build26.log
+num_test.log
+*.pending
+
+# java
+
+hs_err_*.log
+replay_*.log
+*.hprof
+*.jfr

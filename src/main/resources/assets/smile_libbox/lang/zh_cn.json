@@ -1,0 +1,16 @@
+{
+	"smile_libbox.gui.done": "完成",
+	"smile_libbox.gui.number.bad_range": "不合法的数字！仅支持%s~%s之间的数据",
+	"smile_libbox.gui.number.bad_string": "不合法的字符串！仅支持%s",
+	"smile_libbox.gui.number.range": "允许范围：",
+	"smile_libbox.gui.number.tip": "回车确认 · Esc 取消 · 点右侧按钮切回滑条",
+	"smile_libbox.gui.off": "关",
+	"smile_libbox.gui.on": "开",
+	"smile_libbox.gui.regex.file": ".%s格式文件",
+	"smile_libbox.gui.regex.integer": "整数",
+	"smile_libbox.gui.regex.text": "文本",
+	"smile_libbox.gui.requires": "要启用此项，你需要开启「%s」",
+	"smile_libbox.gui.reset": "重置",
+	"smile_libbox.gui.reset_all": "全部重置",
+	"smile_libbox.gui.unavailable": "该选项暂不可用"
+}

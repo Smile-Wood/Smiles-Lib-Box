@@ -1,0 +1,16 @@
+{
+	"smile_libbox.gui.done": "Done",
+	"smile_libbox.gui.number.bad_range": "Invalid number! Only values between %s and %s are allowed",
+	"smile_libbox.gui.number.bad_string": "Invalid text! Only %s is allowed",
+	"smile_libbox.gui.number.range": "Allowed range: ",
+	"smile_libbox.gui.number.tip": "Enter to confirm · Esc to cancel · small button switches back",
+	"smile_libbox.gui.off": "OFF",
+	"smile_libbox.gui.on": "ON",
+	"smile_libbox.gui.regex.file": "a .%s file",
+	"smile_libbox.gui.regex.integer": "an integer",
+	"smile_libbox.gui.regex.text": "text",
+	"smile_libbox.gui.requires": "To enable this, turn on \"%s\" first",
+	"smile_libbox.gui.reset": "Reset",
+	"smile_libbox.gui.reset_all": "Reset All",
+	"smile_libbox.gui.unavailable": "This option is currently unavailable"
+}

@@ -1,0 +1,19 @@
+{
+	"required": true,
+	"package": "smile_libbox.client.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"minVersion": "0.8",
+	"client": [
+		"LibScreenKeyMixin",
+		"LibMouseMixin",
+		"LibContextualBarMixin",
+		"LibChatDraftMixin",
+		"WorldPacketsMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}
