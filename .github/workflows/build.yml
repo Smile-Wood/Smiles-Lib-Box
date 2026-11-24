@@ -1,7 +1,6 @@
-# Automatically build the project and run any configured tests for every push
-# and submitted pull request. This can help catch issues that only occur on
-# certain platforms or Java versions, and provides a first line of defence
-# against bad commits.
+# Builds every Stonecutter node of the library, one job per game version.
+# The library ships one jar per game version, so a single-node build would hide
+# breakage in the other seven adapters.
 
 name: build
 on: [pull_request, push]
@@ -9,6 +8,10 @@ on: [pull_request, push]
 jobs:
   build:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['1.20.1', '1.20.4', '1.20.6', '1.21.1', '1.21.4', '1.21.5', '1.21.8', '1.21.11']
     steps:
       - name: checkout repository
         uses: actions/checkout@v6
@@ -21,10 +24,11 @@ jobs:
           distribution: 'microsoft'
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
-      - name: build
-        run: ./gradlew build
+      - name: build ${{ matrix.node }}
+        run: ./gradlew :${{ matrix.node }}:build
       - name: capture build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: Artifacts
-          path: build/libs/
+          name: Artifacts-${{ matrix.node }}
+          path: versions/${{ matrix.node }}/build/libs/*.jar
+          if-no-files-found: error
