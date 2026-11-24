@@ -704,4 +704,4 @@ Smile's toolb 已按此接入（硬依赖），它自身是**单 jar**、声明 
 
 # License
 
-CC0-1.0（沿用官方模板）。
+MIT，见 [LICENSE](LICENSE)。

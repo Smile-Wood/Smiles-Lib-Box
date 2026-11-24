@@ -7,7 +7,7 @@
 	"authors": [
 		"Me!"
 	],
-	"license": "CC0-1.0",
+	"license": "MIT",
 	"icon": "assets/smile_libbox/icon.png",
 	"environment": "*",
 	"entrypoints": {

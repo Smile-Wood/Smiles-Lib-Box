@@ -652,4 +652,4 @@ sections 4 / 5 / 7 of `VERIFY.md`.
 
 # License
 
-CC0-1.0 (as in the official template).
+MIT — see [LICENSE](LICENSE).
