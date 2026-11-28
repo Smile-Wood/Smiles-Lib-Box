@@ -1,5 +1,6 @@
-# 推送到 main 自动构建全部游戏版本节点，以 alpha 版本发布到 Modrinth；
-# 手动触发时可选 beta 或正式 release（release 同时打 git tag 并建 GitHub Release）。
+# 推送到 main 自动构建全部游戏版本节点并发布到 Modrinth：平时发 alpha，
+# 每攒够 5 个 alpha 就发一个 beta（更新说明汇总这 5 次的提交）。
+# 手动触发时可直接发 beta 或正式 release（release 同时打 git tag 并建 GitHub Release）。
 #
 # 前置配置（仓库 Settings → Secrets and variables → Actions）：
 #   secrets.MODRINTH_TOKEN     Modrinth 个人访问令牌，需要 Create versions 权限
@@ -11,11 +12,10 @@
 # 装错版本会被 Loader 直接拒绝。所以 Modrinth 上同样按游戏版本各发一个条目，
 # 用户在版本筛选里点自己的游戏版本就能拿到唯一正确的 jar。
 #
-# 一次构建产生八个条目，所以发布后会自动清理：
-#   alpha  —— 只保留最近 5 轮（每轮的 8 个游戏版本算一轮），更早的删掉
-#   beta   —— 只保留刚发的这一轮（beta 是定版候选，旧的就该消失）
-#   release—— 不动，正式版永远保留
-# 清理只看各自渠道的 version_type，不会跨渠道误删。
+# Alpha 计数靠 git tag 维持（alpha-1、alpha-2…，发 beta 时打 beta-<累计 alpha 数> 归零），
+# 不依赖任何外部状态：同一次发布的 8 个游戏版本算 1 个 alpha。
+#
+# 发布到 Modrinth 的版本一律不删除，历史 alpha / beta 都留在项目里可查可下载。
 
 name: publish
 
@@ -27,7 +27,7 @@ on:
       channel:
         description: 发布渠道（alpha 为日常自动构建，beta 为定版候选，release 为正式版）
         type: choice
-        options: [beta, release]
+        options: [alpha, beta, release]
         default: beta
 
 # 不并发发布，但也不取消进行中的一次（上传到一半被 kill 会留下半成品版本）
@@ -41,10 +41,15 @@ jobs:
     outputs:
       version: ${{ steps.derive.outputs.version }}
       channel: ${{ steps.derive.outputs.channel }}
+      seq: ${{ steps.derive.outputs.seq }}
+      alpha_total: ${{ steps.derive.outputs.alpha_total }}
       nodes: ${{ steps.derive.outputs.nodes }}
     steps:
       - name: checkout repository
         uses: actions/checkout@v6
+        with:
+          # 需要完整历史与 tag：alpha 的序号就是 git tag 数出来的
+          fetch-depth: 0
       - name: derive version and node list
         id: derive
         env:
@@ -60,9 +65,17 @@ jobs:
           # 1.20.1 1.20.4 … → ["1.20.1","1.20.4",…]，matrix 需要 JSON 数组
           echo "nodes=[$(echo "$nodes" | sed -E 's/([^ ]+)/"\1"/g; s/ /,/g')]" >> "$GITHUB_OUTPUT"
 
-          # push 事件没有 inputs，只有手动触发才有；手动没选时按 beta 走
+          # alpha 计数：alpha-N 是每次自动发布的序号，beta-N 记着「定版时已有多少个 alpha」
+          alpha_total=$(git tag -l 'alpha-*' | wc -l | tr -d ' ')
+          last_beta=$(git tag -l 'beta-*' | sed 's/^beta-//' | sort -n | tail -1)
+          last_beta=${last_beta:-0}
+          seq=$((alpha_total + 1))
+
           if [ -n "${CHANNEL_INPUT}" ]; then
             channel="${CHANNEL_INPUT}"
+          elif [ $((alpha_total - last_beta)) -ge 5 ]; then
+            # 上次定版之后已经攒够 5 个 alpha，这一轮就出 beta
+            channel=beta
           else
             channel=alpha
           fi
@@ -75,9 +88,12 @@ jobs:
             # alpha / beta 带 run number：同一提交重复跑也不会撞号
             version="${base}-${channel}.${GITHUB_RUN_NUMBER}"
           fi
+
           echo "channel=${channel}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "本次发布：${channel}，版本号 ${version}"
+          echo "seq=${seq}" >> "$GITHUB_OUTPUT"
+          echo "alpha_total=${alpha_total}" >> "$GITHUB_OUTPUT"
+          echo "现有 alpha ${alpha_total} 个，上次定版在 ${last_beta}；本次发布 ${channel}，版本号 ${version}"
 
   build:
     needs: prepare
@@ -136,7 +152,7 @@ jobs:
             {
               case "$CHANNEL" in
                 alpha) echo "自动构建的 alpha 版本，对应提交 \`${GITHUB_SHA::7}\`。" ;;
-                beta)  echo "手动触发的 beta 版本，对应提交 \`${GITHUB_SHA::7}\`，供定版前验证。" ;;
+                beta)  echo "由最近 5 个 alpha 汇总而来的 beta，对应提交 \`${GITHUB_SHA::7}\`，供定版前验证。" ;;
                 *)     echo "构建自提交 \`${GITHUB_SHA::7}\`。" ;;
               esac
               echo
@@ -146,12 +162,10 @@ jobs:
                 git log --pretty='- %s（`%h`）' -1
               fi
               echo
-              if [ "$CHANNEL" = "alpha" ]; then
-                echo "> alpha 为每次推送的自动构建产物，未经过完整人工验证；历史 alpha 只保留最近 5 轮。"
-                echo "> 每个游戏版本一个 jar，请装与游戏版本对应的那个。"
-              else
-                echo "> 每个游戏版本一个 jar，请装与游戏版本对应的那个。"
+              if [ "$CHANNEL" = "beta" ]; then
+                echo "> 这次 beta 覆盖上一次 beta 之后累积的 5 个 alpha；alpha 与 beta 都会留在版本列表里。"
               fi
+              echo "> 每个游戏版本一个 jar，请装与游戏版本对应的那个。"
             } > dist/changelog.md
           fi
       - name: capture jars
@@ -238,66 +252,39 @@ jobs:
             echo "配置方式：仓库 Settings → Secrets and variables → Actions。"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # 一次构建八个条目，不清就会把版本页淹掉。
-  # alpha 保留最近 5 轮（同一次 run 的八个条目算一轮，靠版本号里的 run number 认），
-  # beta 只保留刚发的这一轮，release 一律不碰。
-  cleanup:
+  # 只在发布成功后记账：alpha-N 让下一次知道攒到第几个了，
+  # beta-N 记下「定版时已有 N 个 alpha」，下一次从 N 重新攒 5 个。
+  # 这些 tag 只用于计数，不发布任何东西，也不会再触发本工作流。
+  count:
     needs: [prepare, publish]
-    if: always() && needs.prepare.outputs.channel != 'release'
+    if: needs.publish.result == 'success'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     env:
       MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
-      MODRINTH_PROJECT_ID: ${{ vars.MODRINTH_PROJECT_ID }}
-      BASE_VERSION: ${{ needs.prepare.outputs.version }}
       CHANNEL: ${{ needs.prepare.outputs.channel }}
+      SEQ: ${{ needs.prepare.outputs.seq }}
+      ALPHA_TOTAL: ${{ needs.prepare.outputs.alpha_total }}
     steps:
-      - name: delete outdated versions
+      - name: checkout repository
+        uses: actions/checkout@v6
+      - name: tag this release
         run: |
-          if [ -z "$MODRINTH_TOKEN" ] || [ -z "$MODRINTH_PROJECT_ID" ]; then
-            echo "未配置 Modrinth 凭据，跳过清理。"
+          if [ -z "$MODRINTH_TOKEN" ]; then
+            echo "本次只构建没发布，不记账。"
             exit 0
           fi
-          resp=$(curl -s -w '\n%{http_code}' \
-            -H "Authorization: ${MODRINTH_TOKEN}" \
-            "https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}/version")
-          code=$(echo "$resp" | tail -1)
-          body=$(echo "$resp" | sed '$d')
-          if [ "$code" != "200" ]; then
-            # 项目还没通过审核时这个接口是 404，清理不是关键路径，跳过即可
-            echo "::warning::查询现有版本返回 HTTP ${code}，跳过清理（项目未过审时属正常）"
-            exit 0
-          fi
-
-          delete_version() {
-            echo "删除 $2（$1）"
-            curl -s -o /dev/null -w "  HTTP %{http_code}\n" -X DELETE \
-              -H "Authorization: ${MODRINTH_TOKEN}" \
-              "https://api.modrinth.com/v2/version/$1"
-          }
-
           if [ "$CHANNEL" = "alpha" ]; then
-            # 版本号形如 1.0.26-alpha.37+1.20.1，其中的 37 是 GitHub run number
-            keep=$(echo "$body" | jq -r '.[] | select(.version_type == "alpha") | .version_number' \
-              | sed -nE 's/.*-alpha\.([0-9]+)\+.*/\1/p' | sort -rn | uniq | head -5)
-            if [ -z "$keep" ]; then
-              echo "没有可清理的 alpha。"
-              exit 0
-            fi
-            echo "保留最近 5 轮的 alpha：$(echo $keep | tr '\n' ' ')"
-            echo "$body" | jq -r '.[] | select(.version_type == "alpha") | "\(.id)|\(.version_number)"' \
-              | while IFS='|' read -r id number; do
-                  run=$(echo "$number" | sed -nE 's/.*-alpha\.([0-9]+)\+.*/\1/p')
-                  if [ -z "$run" ] || ! echo "$keep" | grep -qx "$run"; then
-                    delete_version "$id" "$number"
-                  fi
-                done
+            tag="alpha-${SEQ}"
           else
-            echo "beta 只保留本轮 ${BASE_VERSION}。"
-            echo "$body" | jq -r '.[] | select(.version_type == "beta") | "\(.id)|\(.version_number)"' \
-              | while IFS='|' read -r id number; do
-                  case "$number" in
-                    "${BASE_VERSION}+"*) continue ;;
-                  esac
-                  delete_version "$id" "$number"
-                done
+            # beta 与 release 都是定版点：记下当时攒到第几个 alpha，之后重新数 5 个
+            tag="beta-${ALPHA_TOTAL}"
           fi
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "$tag 已存在，跳过。"
+            exit 0
+          fi
+          git tag "$tag"
+          git push origin "refs/tags/$tag"
+          echo "已打 tag：$tag"
