@@ -185,6 +185,9 @@ jobs:
           changelog-file: cl.md
           loaders: fabric
           game-versions: ${{ matrix.node }}
+          # 按游戏版本分开发布的库，每个版本的正式版都该保留「Featured」，
+          # 不能让后发的那个把前七个顶掉；beta 也走同一套，等清理时自然消失。
+          modrinth-unfeature-mode: none
           files: dist/smile_libbox-${{ env.BASE_VERSION }}+${{ matrix.node }}.jar
           # 显式声明会顶掉 Modrinth 对 fabric.mod.json 的自动解析，所以这里要写全：
           # 这个库只有 Fabric API 一个前置，用官方 slug 比 ID 好读。
