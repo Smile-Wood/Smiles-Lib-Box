@@ -1,5 +1,5 @@
-# 每次推送到 main 自动构建全部游戏版本节点，并以 beta 版本发布到 Modrinth；
-# 手动触发时可选以正式 release 版本发布（同时打 git tag 并建 GitHub Release）。
+# 推送到 main 自动构建全部游戏版本节点，以 alpha 版本发布到 Modrinth；
+# 手动触发时可选 beta 或正式 release（release 同时打 git tag 并建 GitHub Release）。
 #
 # 前置配置（仓库 Settings → Secrets and variables → Actions）：
 #   secrets.MODRINTH_TOKEN     Modrinth 个人访问令牌，需要 Create versions 权限
@@ -10,8 +10,12 @@
 # 这个库是「一个游戏版本一个 jar」：每个 jar 的 depends.minecraft 是 ~<版本>，
 # 装错版本会被 Loader 直接拒绝。所以 Modrinth 上同样按游戏版本各发一个条目，
 # 用户在版本筛选里点自己的游戏版本就能拿到唯一正确的 jar。
-# 一次 beta 构建会产生八个条目，因此发布成功后会删掉上一轮 beta，避免版本页越堆越长
-# （只删 version_type=beta 且版本号属于上一轮的，正式版和刚发的这一轮都不会被碰）。
+#
+# 一次构建产生八个条目，所以发布后会自动清理：
+#   alpha  —— 只保留最近 5 轮（每轮的 8 个游戏版本算一轮），更早的删掉
+#   beta   —— 只保留刚发的这一轮（beta 是定版候选，旧的就该消失）
+#   release—— 不动，正式版永远保留
+# 清理只看各自渠道的 version_type，不会跨渠道误删。
 
 name: publish
 
@@ -20,10 +24,11 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      release:
-        description: 以正式 release 版本发布（版本号用 gradle.properties 里的 mod.version）
-        type: boolean
-        default: false
+      channel:
+        description: 发布渠道（alpha 为日常自动构建，beta 为定版候选，release 为正式版）
+        type: choice
+        options: [beta, release]
+        default: beta
 
 # 不并发发布，但也不取消进行中的一次（上传到一半被 kill 会留下半成品版本）
 concurrency:
@@ -35,13 +40,15 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.derive.outputs.version }}
-      type: ${{ steps.derive.outputs.type }}
+      channel: ${{ steps.derive.outputs.channel }}
       nodes: ${{ steps.derive.outputs.nodes }}
     steps:
       - name: checkout repository
         uses: actions/checkout@v6
       - name: derive version and node list
         id: derive
+        env:
+          CHANNEL_INPUT: ${{ inputs.channel }}
         run: |
           # 节点列表只认 settings.gradle，不再在这里抄一遍，避免两处漂移
           line=$(grep -E "^[[:space:]]*versions[[:space:]]" settings.gradle | head -1)
@@ -53,15 +60,24 @@ jobs:
           # 1.20.1 1.20.4 … → ["1.20.1","1.20.4",…]，matrix 需要 JSON 数组
           echo "nodes=[$(echo "$nodes" | sed -E 's/([^ ]+)/"\1"/g; s/ /,/g')]" >> "$GITHUB_OUTPUT"
 
-          base=$(sed -n 's/^mod.version=//p' gradle.properties | head -1)
-          if [ "${{ inputs.release }}" = "true" ]; then
-            echo "version=${base}" >> "$GITHUB_OUTPUT"
-            echo "type=release" >> "$GITHUB_OUTPUT"
+          # push 事件没有 inputs，只有手动触发才有；手动没选时按 beta 走
+          if [ -n "${CHANNEL_INPUT}" ]; then
+            channel="${CHANNEL_INPUT}"
           else
-            # 带 run number：同一提交重复跑也不会撞号，且不必再拼 sha 把文件名撑长
-            echo "version=${base}-beta.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-            echo "type=beta" >> "$GITHUB_OUTPUT"
+            channel=alpha
           fi
+
+          base=$(sed -n 's/^mod.version=//p' gradle.properties | head -1)
+          if [ "$channel" = "release" ]; then
+            # 正式版就是 gradle.properties 里那个版本号本身，不带后缀
+            version="${base}"
+          else
+            # alpha / beta 带 run number：同一提交重复跑也不会撞号
+            version="${base}-${channel}.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "channel=${channel}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "本次发布：${channel}，版本号 ${version}"
 
   build:
     needs: prepare
@@ -81,7 +97,7 @@ jobs:
         with:
           java-version: '25'
           distribution: 'microsoft'
-      # 八个节点的 MC jar 与 Fabric API 全靠 loom 下载，缓存能把这个 job 从十几分钟压到几分钟
+      # 八个节点的 MC jar 与 Fabric API 全靠 loom 下载，缓存能把这个 job 从三分钟压到一分多
       - name: setup gradle
         uses: gradle/actions/setup-gradle@v6
       - name: make gradle wrapper executable
@@ -100,7 +116,7 @@ jobs:
         env:
           NODES: ${{ needs.prepare.outputs.nodes }}
           BASE_VERSION: ${{ needs.prepare.outputs.version }}
-          IS_RELEASE: ${{ needs.prepare.outputs.type == 'release' }}
+          CHANNEL: ${{ needs.prepare.outputs.channel }}
         run: |
           mkdir -p dist
           for node in $(echo "$NODES" | tr -d '[]"' | tr ',' ' '); do
@@ -114,11 +130,15 @@ jobs:
           ls -l dist
 
           notes=".github/release-notes-v${BASE_VERSION}.md"
-          if [ "$IS_RELEASE" = "true" ] && [ -f "$notes" ]; then
+          if [ "$CHANNEL" = "release" ] && [ -f "$notes" ]; then
             cp "$notes" dist/changelog.md
           else
             {
-              echo "自动构建的 beta 版本，对应提交 \`${GITHUB_SHA::7}\`。"
+              case "$CHANNEL" in
+                alpha) echo "自动构建的 alpha 版本，对应提交 \`${GITHUB_SHA::7}\`。" ;;
+                beta)  echo "手动触发的 beta 版本，对应提交 \`${GITHUB_SHA::7}\`，供定版前验证。" ;;
+                *)     echo "构建自提交 \`${GITHUB_SHA::7}\`。" ;;
+              esac
               echo
               if [ -n "${{ github.event.before }}" ] && git rev-parse --verify --quiet "${{ github.event.before }}" >/dev/null; then
                 git log --pretty='- %s（`%h`）' "${{ github.event.before }}..HEAD"
@@ -126,7 +146,12 @@ jobs:
                 git log --pretty='- %s（`%h`）' -1
               fi
               echo
-              echo "> beta 为自动构建产物，未经过完整人工验证。每个游戏版本一个 jar，请装与游戏版本对应的那个。"
+              if [ "$CHANNEL" = "alpha" ]; then
+                echo "> alpha 为每次推送的自动构建产物，未经过完整人工验证；历史 alpha 只保留最近 5 轮。"
+                echo "> 每个游戏版本一个 jar，请装与游戏版本对应的那个。"
+              else
+                echo "> 每个游戏版本一个 jar，请装与游戏版本对应的那个。"
+              fi
             } > dist/changelog.md
           fi
       - name: capture jars
@@ -136,7 +161,7 @@ jobs:
           path: dist/
           if-no-files-found: error
       - name: create github release
-        if: needs.prepare.outputs.type == 'release'
+        if: needs.prepare.outputs.channel == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_VERSION: ${{ needs.prepare.outputs.version }}
@@ -159,6 +184,7 @@ jobs:
       MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
       MODRINTH_PROJECT_ID: ${{ vars.MODRINTH_PROJECT_ID }}
       BASE_VERSION: ${{ needs.prepare.outputs.version }}
+      CHANNEL: ${{ needs.prepare.outputs.channel }}
     steps:
       - name: download jars
         uses: actions/download-artifact@v8
@@ -181,12 +207,12 @@ jobs:
           modrinth-token: ${{ env.MODRINTH_TOKEN }}
           name: Smile's Lib Box for Minecraft ${{ matrix.node }}
           version: ${{ env.BASE_VERSION }}+${{ matrix.node }}
-          version-type: ${{ needs.prepare.outputs.type }}
+          version-type: ${{ env.CHANNEL }}
           changelog-file: cl.md
           loaders: fabric
           game-versions: ${{ matrix.node }}
-          # 按游戏版本分开发布的库，每个版本的正式版都该保留「Featured」，
-          # 不能让后发的那个把前七个顶掉；beta 也走同一套，等清理时自然消失。
+          # 按游戏版本分开发布的库，每个渠道的当前版本都该保留「Featured」，
+          # 不能让后发的那个把前面七个顶掉。
           modrinth-unfeature-mode: none
           files: dist/smile_libbox-${{ env.BASE_VERSION }}+${{ matrix.node }}.jar
           # 显式声明会顶掉 Modrinth 对 fabric.mod.json 的自动解析，所以这里要写全：
@@ -212,19 +238,20 @@ jobs:
             echo "配置方式：仓库 Settings → Secrets and variables → Actions。"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # beta 一次生成八个条目，不清掉的话推几次项目页就被 beta 淹了。
-  # 只删 version_type=beta、版本号属于本 base、且不是刚发的这一轮的条目；
-  # 正式版不在筛选范围内，永远不会被这个 job 碰。
+  # 一次构建八个条目，不清就会把版本页淹掉。
+  # alpha 保留最近 5 轮（同一次 run 的八个条目算一轮，靠版本号里的 run number 认），
+  # beta 只保留刚发的这一轮，release 一律不碰。
   cleanup:
     needs: [prepare, publish]
-    if: always() && needs.prepare.outputs.type == 'beta'
+    if: always() && needs.prepare.outputs.channel != 'release'
     runs-on: ubuntu-24.04
     env:
       MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
       MODRINTH_PROJECT_ID: ${{ vars.MODRINTH_PROJECT_ID }}
       BASE_VERSION: ${{ needs.prepare.outputs.version }}
+      CHANNEL: ${{ needs.prepare.outputs.channel }}
     steps:
-      - name: delete previous beta versions
+      - name: delete outdated versions
         run: |
           if [ -z "$MODRINTH_TOKEN" ] || [ -z "$MODRINTH_PROJECT_ID" ]; then
             echo "未配置 Modrinth 凭据，跳过清理。"
@@ -240,21 +267,37 @@ jobs:
             echo "::warning::查询现有版本返回 HTTP ${code}，跳过清理（项目未过审时属正常）"
             exit 0
           fi
-          # 1.0.26-beta.12 → 同一个历史前缀 1.0.26-beta.
-          prefix="${BASE_VERSION%-beta.*}-beta."
-          # 本轮刚发的版本号形如 1.0.26-beta.12+1.20.1，按前缀整体排除
-          ids=$(echo "$body" | jq -r --arg p "$prefix" --arg cur "${BASE_VERSION}+" \
-            '.[] | select(.version_type == "beta")
-                | select(.version_number | startswith($p))
-                | select(.version_number | startswith($cur) | not)
-                | "\(.id) \(.version_number)"')
-          if [ -z "$ids" ]; then
-            echo "没有需要清理的历史 beta。"
-            exit 0
-          fi
-          echo "$ids" | while read -r id number; do
-            echo "删除旧 beta：$number（$id）"
+
+          delete_version() {
+            echo "删除 $2（$1）"
             curl -s -o /dev/null -w "  HTTP %{http_code}\n" -X DELETE \
               -H "Authorization: ${MODRINTH_TOKEN}" \
-              "https://api.modrinth.com/v2/version/${id}"
-          done
+              "https://api.modrinth.com/v2/version/$1"
+          }
+
+          if [ "$CHANNEL" = "alpha" ]; then
+            # 版本号形如 1.0.26-alpha.37+1.20.1，其中的 37 是 GitHub run number
+            keep=$(echo "$body" | jq -r '.[] | select(.version_type == "alpha") | .version_number' \
+              | sed -nE 's/.*-alpha\.([0-9]+)\+.*/\1/p' | sort -rn | uniq | head -5)
+            if [ -z "$keep" ]; then
+              echo "没有可清理的 alpha。"
+              exit 0
+            fi
+            echo "保留最近 5 轮的 alpha：$(echo $keep | tr '\n' ' ')"
+            echo "$body" | jq -r '.[] | select(.version_type == "alpha") | "\(.id)|\(.version_number)"' \
+              | while IFS='|' read -r id number; do
+                  run=$(echo "$number" | sed -nE 's/.*-alpha\.([0-9]+)\+.*/\1/p')
+                  if [ -z "$run" ] || ! echo "$keep" | grep -qx "$run"; then
+                    delete_version "$id" "$number"
+                  fi
+                done
+          else
+            echo "beta 只保留本轮 ${BASE_VERSION}。"
+            echo "$body" | jq -r '.[] | select(.version_type == "beta") | "\(.id)|\(.version_number)"' \
+              | while IFS='|' read -r id number; do
+                  case "$number" in
+                    "${BASE_VERSION}+"*) continue ;;
+                  esac
+                  delete_version "$id" "$number"
+                done
+          fi
