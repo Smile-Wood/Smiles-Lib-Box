@@ -7,12 +7,13 @@
 上下文条注入）按版本编译成适配层，交给依赖方调用。
 
 框架由官方 Fabric CLI（`fabric init`）生成。产物按版本出 jar：
-`smile_libbox-1.0.4+1.20.1.jar` … `+1.21.11.jar`（8 个），外加一个不绑定
-游戏版本的 `+generic.jar`。`smile_libbox.api` 下不引用任何 `net.minecraft.*`
-类型（已核对 class 常量池），这部分同一份 class 能装到所有版本；
-`smile_libbox.client.compat` / `mixin` 下的适配层按版本编译，refmap 由该版本
-的 MC jar 生成。安装时按游戏版本选对应 jar 放进 `mods/`；没有精确匹配的版本用
-`+generic.jar`（只提供纯判断 API，不启用任何需要注入 MC 的适配层）。
+`smile_libbox-1.0.26+1.20.1.jar` … `+1.21.11.jar`（8 个，一个游戏版本一个），
+外加交给独立脚本装配的 `+26.2.jar`（26.2 没有 intermediary，见「构建与安装」）。
+这里**故意不提供**「万能包」：`smile_libbox.client.compat` / `mixin` 下的适配层
+按版本编译、refmap 也由该版本的 MC jar 生成，`depends.minecraft` 是 `~<版本>`，
+装错版本会被 Loader 直接拒绝，而不是进游戏后才出错。`smile_libbox.api` 下不引用任何
+`net.minecraft.*` 类型（已核对 class 常量池），这部分同一份 class 能装到所有版本 ——
+这也是依赖方可以只出一个 jar 的原因。安装时按游戏版本选对应 jar 放进 `mods/`。
 
 ---
 
@@ -187,7 +188,7 @@ public final class MyMixinPlugin extends VersionedMixinPlugin {
 整合包 51 个模组没有一个引用 `net/minecraft/class_*`。因此走不了 Loom 重映射，
 改由 `tools/build_named26.py` 用 JDK 26 的 `javac --release 25` **直接对 26.2 客户端
 jar 编译** `VersionedScreen` / `UiBackend` / `VersionedNarrator` 以及按官方名书写的 client mixin，
-产物 `smile_libbox-1.0.4+26.2.jar`（class 版本 69、官方名描述符、无 refmap）。
+产物 `smile_libbox-1.0.26+26.2.jar`（class 版本 69、官方名描述符、无 refmap）。
 mixin 的目标类名与注入描述符同样用官方名书写，所以**不需要 refmap 也能注入**。
 toolb 单 jar 全部 class 的常量池扫描结果为**零 `net/minecraft` 引用**，
 只通过 `smile_libbox.api.ui.Ui` 门面调用库。
@@ -660,13 +661,13 @@ python tools/selftest-number/run_selftest.py   # 数字输入校验的纯 Java �
 ```
 
 第一条走 Stonecutter/Loom，按 `settings.gradle` 里的 8 个版本各编译一次，产物在
-`versions/<版本>/build/libs/smile_libbox-1.0.4+<版本>.jar`。第二条不能用 Loom：
+`versions/<版本>/build/libs/smile_libbox-1.0.26+<版本>.jar`。第二条不能用 Loom：
 26.2 没有 intermediary / refmap，脚本从 `26.2.json` 精确构造 classpath（含
 `fabric-api` 的 `META-INF/jars/*.jar` 子模块），另外从 `libraries/net/fabricmc/sponge-mixin`
 兜底取注解 jar（启动器常把它的 `downloads.artifact` 留空，缺了就编译不了 mixin），
 用 JDK 26 的 `javac --release 25` 直接对 26.2 客户端 jar 编译 `named26/src` 下的
 适配层与三个 mixin，再以 1.20.1 jar 的纯 Java 部分为底拼出
-`build/libs/smile_libbox-1.0.4+26.2.jar`；`named26/resources` 下的 mixin 配置会一起
+`build/libs/smile_libbox-1.0.26+26.2.jar`；`named26/resources` 下的 mixin 配置会一起
 写入 jar，并在 `fabric.mod.json` 的 `mixins` 里声明。可用环境变量
 `MC_HOME` / `JAVAC` / `MC_VERSION` 覆盖路径。
 
@@ -675,13 +676,12 @@ python tools/selftest-number/run_selftest.py   # 数字输入校验的纯 Java �
 > 读取整段消失，所有重锤都被当成 0 级，永远切到背包里靠前的那把。脚本现在会在
 > 编译前扫描 `named26/src`，发现条件注释直接报错退出；26.2 要用的分支请直接写出来。
 
-根目录 `build/libs/` 下另有
-`smile_libbox-1.0.4+generic.jar` 兜底。使用方按目标游戏版本引入对应坐标：
+没有万能兜底 jar —— 一个 jar 只在它编译时对应的游戏版本上加载。使用方按目标游戏版本引入对应坐标：
 
 ```groovy
 repositories { mavenLocal() }
 dependencies {
-    modImplementation "smile_libbox:smile_libbox:1.0.4+1.20.1"
+    modImplementation "smile_libbox:smile_libbox:1.0.26+1.20.1"
 }
 ```
 
@@ -690,10 +690,9 @@ dependencies {
 `depends.minecraft` 是 `~<版本>`（26.2 jar 另要求 `java: >=25`），装错会被 Loader
 拒绝。`+26.2.jar` 的适配层是官方名描述符、class 版本 69，带三个按官方名写的 client mixin
 （`smile_libbox.named26.mixins.json`，`compatibilityLevel: JAVA_25`）、不带 refmap；
-`+generic.jar` 声明 `minecraft: "*"` 且不启用任何 client mixin，只在没有精确匹配的
-版本时兜底：它是从 1.20.1 产物改元数据生成的，只有 `api` 包（零 MC 引用）可用，
-`client.compat` 下的适配层仍是 intermediary 编译产物。**兜底 jar 不等于跨命名空间兼容**，
-26.2 请用 `+26.2.jar`。
+**兜底 jar 不等于跨命名空间兼容。** 早先那个 `+generic.jar` 就是「1.20.1 产物改元数据、
+声明 `minecraft: "*"`」，已经删掉了：那样只有 `api` 包（零 MC 引用）能用，
+`client.compat` 下的适配层仍是 intermediary 编译产物，加载不起来。26.2 请用 `+26.2.jar`。
 
 Smile's toolb 已按此接入（硬依赖），它自身是**单 jar**、声明 `minecraft: "*"`，
 全部 34 个 class 的常量池零 `net/minecraft` 引用，只通过 `smile_libbox.api.ui.Ui`

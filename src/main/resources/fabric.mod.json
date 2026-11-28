@@ -3,9 +3,9 @@
 	"id": "smile_libbox",
 	"version": "${version}",
 	"name": "Smile's Lib Box",
-	"description": "按游戏版本分发的跨版本转译层：每个 jar 用对应版本的 Minecraft 编译适配实现与 mixin，向上暴露一套固定 API，让依赖它的模组只需一个 jar。",
+	"description": "Cross-version prerequisite library: one fixed API over the Minecraft capabilities that change between versions, with the adapter layer and mixins compiled per game version. A dependent mod stays a single jar and asks the library what the game supports instead of branching on version numbers.",
 	"authors": [
-		"Me!"
+		"Smile Wood"
 	],
 	"license": "MIT",
 	"icon": "assets/smile_libbox/icon.png",
