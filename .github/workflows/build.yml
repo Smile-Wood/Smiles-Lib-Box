@@ -1,9 +1,16 @@
 # Builds every Stonecutter node of the library, one job per game version.
 # The library ships one jar per game version, so a single-node build would hide
 # breakage in the other seven adapters.
+#
+# 主线分支上不跑这个：publish.yml 会把八个节点一次性构建并发布，重复构建没有意义。
+# 这里只看 PR 与功能分支，一个节点一个 job，坏在哪个版本 PR 上就能看出来。
 
 name: build
-on: [pull_request, push]
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -22,6 +29,8 @@ jobs:
         with:
           java-version: '25'
           distribution: 'microsoft'
+      - name: setup gradle
+        uses: gradle/actions/setup-gradle@v6
       - name: make gradle wrapper executable
         run: chmod +x ./gradlew
       - name: build ${{ matrix.node }}

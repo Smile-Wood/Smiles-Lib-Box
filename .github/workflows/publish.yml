@@ -1,0 +1,257 @@
+# 每次推送到 main 自动构建全部游戏版本节点，并以 beta 版本发布到 Modrinth；
+# 手动触发时可选以正式 release 版本发布（同时打 git tag 并建 GitHub Release）。
+#
+# 前置配置（仓库 Settings → Secrets and variables → Actions）：
+#   secrets.MODRINTH_TOKEN     Modrinth 个人访问令牌，需要 Create versions 权限
+#   vars.MODRINTH_PROJECT_ID   Modrinth 项目 ID
+#
+# 两者缺一时只构建、不发布，并在运行摘要里逐项列出缺什么，避免刚接入就整条流水线标红。
+#
+# 这个库是「一个游戏版本一个 jar」：每个 jar 的 depends.minecraft 是 ~<版本>，
+# 装错版本会被 Loader 直接拒绝。所以 Modrinth 上同样按游戏版本各发一个条目，
+# 用户在版本筛选里点自己的游戏版本就能拿到唯一正确的 jar。
+# 一次 beta 构建会产生八个条目，因此发布成功后会删掉上一轮 beta，避免版本页越堆越长
+# （只删 version_type=beta 且版本号属于上一轮的，正式版和刚发的这一轮都不会被碰）。
+
+name: publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 以正式 release 版本发布（版本号用 gradle.properties 里的 mod.version）
+        type: boolean
+        default: false
+
+# 不并发发布，但也不取消进行中的一次（上传到一半被 kill 会留下半成品版本）
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+      type: ${{ steps.derive.outputs.type }}
+      nodes: ${{ steps.derive.outputs.nodes }}
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+      - name: derive version and node list
+        id: derive
+        run: |
+          # 节点列表只认 settings.gradle，不再在这里抄一遍，避免两处漂移
+          line=$(grep -E "^[[:space:]]*versions[[:space:]]" settings.gradle | head -1)
+          nodes=$(echo "$line" | sed -E "s/.*versions[[:space:]]+//; s/['\",]//g")
+          if [ -z "$nodes" ]; then
+            echo "::error::没能从 settings.gradle 里解析出游戏版本节点"
+            exit 1
+          fi
+          # 1.20.1 1.20.4 … → ["1.20.1","1.20.4",…]，matrix 需要 JSON 数组
+          echo "nodes=[$(echo "$nodes" | sed -E 's/([^ ]+)/"\1"/g; s/ /,/g')]" >> "$GITHUB_OUTPUT"
+
+          base=$(sed -n 's/^mod.version=//p' gradle.properties | head -1)
+          if [ "${{ inputs.release }}" = "true" ]; then
+            echo "version=${base}" >> "$GITHUB_OUTPUT"
+            echo "type=release" >> "$GITHUB_OUTPUT"
+          else
+            # 带 run number：同一提交重复跑也不会撞号，且不必再拼 sha 把文件名撑长
+            echo "version=${base}-beta.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "type=beta" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      # create github release 步骤需要写权限；构建本身只用读
+      contents: write
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: validate gradle wrapper
+        uses: gradle/actions/wrapper-validation@v6
+      - name: setup jdk
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'microsoft'
+      # 八个节点的 MC jar 与 Fabric API 全靠 loom 下载，缓存能把这个 job 从十几分钟压到几分钟
+      - name: setup gradle
+        uses: gradle/actions/setup-gradle@v6
+      - name: make gradle wrapper executable
+        run: chmod +x ./gradlew
+      - name: build every node
+        env:
+          NODES: ${{ needs.prepare.outputs.nodes }}
+          BASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          tasks=""
+          for node in $(echo "$NODES" | tr -d '[]"' | tr ',' ' '); do
+            tasks="$tasks :$node:build"
+          done
+          ./gradlew $tasks -PbaseVersion="$BASE_VERSION"
+      - name: collect jars and write changelog
+        env:
+          NODES: ${{ needs.prepare.outputs.nodes }}
+          BASE_VERSION: ${{ needs.prepare.outputs.version }}
+          IS_RELEASE: ${{ needs.prepare.outputs.type == 'release' }}
+        run: |
+          mkdir -p dist
+          for node in $(echo "$NODES" | tr -d '[]"' | tr ',' ' '); do
+            jar="versions/${node}/build/libs/smile_libbox-${BASE_VERSION}+${node}.jar"
+            if [ ! -f "$jar" ]; then
+              echo "::error::缺少产物 $jar"
+              exit 1
+            fi
+            cp "$jar" dist/
+          done
+          ls -l dist
+
+          notes=".github/release-notes-v${BASE_VERSION}.md"
+          if [ "$IS_RELEASE" = "true" ] && [ -f "$notes" ]; then
+            cp "$notes" dist/changelog.md
+          else
+            {
+              echo "自动构建的 beta 版本，对应提交 \`${GITHUB_SHA::7}\`。"
+              echo
+              if [ -n "${{ github.event.before }}" ] && git rev-parse --verify --quiet "${{ github.event.before }}" >/dev/null; then
+                git log --pretty='- %s（`%h`）' "${{ github.event.before }}..HEAD"
+              else
+                git log --pretty='- %s（`%h`）' -1
+              fi
+              echo
+              echo "> beta 为自动构建产物，未经过完整人工验证。每个游戏版本一个 jar，请装与游戏版本对应的那个。"
+            } > dist/changelog.md
+          fi
+      - name: capture jars
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+      - name: create github release
+        if: needs.prepare.outputs.type == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          gh release create "v${BASE_VERSION}" \
+            --title "Smile's Lib Box v${BASE_VERSION}" \
+            --notes-file dist/changelog.md \
+            dist/smile_libbox-*.jar
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      # 同一个项目并发上传容易被限流，逐个发
+      max-parallel: 1
+      matrix:
+        node: ${{ fromJSON(needs.prepare.outputs.nodes) }}
+    env:
+      MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+      MODRINTH_PROJECT_ID: ${{ vars.MODRINTH_PROJECT_ID }}
+      BASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: download jars
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+      - name: write version changelog
+        run: |
+          {
+            echo "适用 Minecraft **${{ matrix.node }}**（Fabric）。"
+            echo
+            cat dist/changelog.md
+          } > cl.md
+      - name: publish to modrinth
+        if: env.MODRINTH_TOKEN != '' && env.MODRINTH_PROJECT_ID != ''
+        uses: Kira-NT/mc-publish@v3.3.2
+        with:
+          # 该 action 原仓库为 Kir-Antipov/mc-publish，已迁移至 Kira-NT，功能相同
+          modrinth-id: ${{ env.MODRINTH_PROJECT_ID }}
+          modrinth-token: ${{ env.MODRINTH_TOKEN }}
+          name: Smile's Lib Box for Minecraft ${{ matrix.node }}
+          version: ${{ env.BASE_VERSION }}+${{ matrix.node }}
+          version-type: ${{ needs.prepare.outputs.type }}
+          changelog-file: cl.md
+          loaders: fabric
+          game-versions: ${{ matrix.node }}
+          files: dist/smile_libbox-${{ env.BASE_VERSION }}+${{ matrix.node }}.jar
+          # 显式声明会顶掉 Modrinth 对 fabric.mod.json 的自动解析，所以这里要写全：
+          # 这个库只有 Fabric API 一个前置，用官方 slug 比 ID 好读。
+          modrinth-dependencies: |
+            fabric-api(required)
+      - name: explain the skipped publish
+        if: env.MODRINTH_TOKEN == '' || env.MODRINTH_PROJECT_ID == ''
+        run: |
+          echo "::warning::Modrinth 发布配置不完整，本次只构建不发布（详见运行摘要）。"
+          {
+            echo "### 已跳过 Modrinth 发布"
+            echo
+            echo "缺少以下配置，补齐后在 Actions 里重跑一次即可发布："
+            echo
+            if [ -z "$MODRINTH_TOKEN" ]; then
+              echo "- \`secrets.MODRINTH_TOKEN\`：Modrinth 个人访问令牌，需要 Create versions 权限"
+            fi
+            if [ -z "$MODRINTH_PROJECT_ID" ]; then
+              echo "- \`vars.MODRINTH_PROJECT_ID\`：Modrinth 项目 ID"
+            fi
+            echo
+            echo "配置方式：仓库 Settings → Secrets and variables → Actions。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # beta 一次生成八个条目，不清掉的话推几次项目页就被 beta 淹了。
+  # 只删 version_type=beta、版本号属于本 base、且不是刚发的这一轮的条目；
+  # 正式版不在筛选范围内，永远不会被这个 job 碰。
+  cleanup:
+    needs: [prepare, publish]
+    if: always() && needs.prepare.outputs.type == 'beta'
+    runs-on: ubuntu-24.04
+    env:
+      MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+      MODRINTH_PROJECT_ID: ${{ vars.MODRINTH_PROJECT_ID }}
+      BASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: delete previous beta versions
+        run: |
+          if [ -z "$MODRINTH_TOKEN" ] || [ -z "$MODRINTH_PROJECT_ID" ]; then
+            echo "未配置 Modrinth 凭据，跳过清理。"
+            exit 0
+          fi
+          resp=$(curl -s -w '\n%{http_code}' \
+            -H "Authorization: ${MODRINTH_TOKEN}" \
+            "https://api.modrinth.com/v2/project/${MODRINTH_PROJECT_ID}/version")
+          code=$(echo "$resp" | tail -1)
+          body=$(echo "$resp" | sed '$d')
+          if [ "$code" != "200" ]; then
+            # 项目还没通过审核时这个接口是 404，清理不是关键路径，跳过即可
+            echo "::warning::查询现有版本返回 HTTP ${code}，跳过清理（项目未过审时属正常）"
+            exit 0
+          fi
+          # 1.0.26-beta.12 → 同一个历史前缀 1.0.26-beta.
+          prefix="${BASE_VERSION%-beta.*}-beta."
+          # 本轮刚发的版本号形如 1.0.26-beta.12+1.20.1，按前缀整体排除
+          ids=$(echo "$body" | jq -r --arg p "$prefix" --arg cur "${BASE_VERSION}+" \
+            '.[] | select(.version_type == "beta")
+                | select(.version_number | startswith($p))
+                | select(.version_number | startswith($cur) | not)
+                | "\(.id) \(.version_number)"')
+          if [ -z "$ids" ]; then
+            echo "没有需要清理的历史 beta。"
+            exit 0
+          fi
+          echo "$ids" | while read -r id number; do
+            echo "删除旧 beta：$number（$id）"
+            curl -s -o /dev/null -w "  HTTP %{http_code}\n" -X DELETE \
+              -H "Authorization: ${MODRINTH_TOKEN}" \
+              "https://api.modrinth.com/v2/version/${id}"
+          done

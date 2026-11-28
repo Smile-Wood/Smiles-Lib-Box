@@ -12,7 +12,12 @@ def mcVersion = stonecutter.current.version
 def javaRelease = (property('deps.java_release') as String).toInteger()
 def modId = property('mod.id')
 
-version = "${property('mod.version')}+${mcVersion}"
+// CI 传 -PbaseVersion=<基础版本> 覆盖 mod.version（beta 版本号要带 run number），
+// 本地直接 ./gradlew build 不传，就还是 gradle.properties 里那个。
+// 每个 jar 的版本统一是「基础版本+游戏版本」，Modrinth 上按节点各发一个版本。
+def baseVersion = (findProperty('baseVersion') ?: property('mod.version')) as String
+
+version = "${baseVersion}+${mcVersion}"
 group = property('mod.group')
 base.archivesName = property('mod.id')
 
