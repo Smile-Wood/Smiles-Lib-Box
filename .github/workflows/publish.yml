@@ -1,5 +1,8 @@
-# 推送到 main 自动构建全部游戏版本节点并发布到 Modrinth：平时发 alpha，
-# 每攒够 5 个 alpha 就发一个 beta（更新说明汇总这 5 次的提交）。
+# 推送到 main 自动构建全部游戏版本节点并发布到 Modrinth，节奏类似浏览器的 canary / beta：
+#   第 1–5 次推送 → alpha（每次推送都出）
+#   第 6 次推送   → 只出 beta，更新说明汇总这一轮 6 次推送的全部改动
+#   之后重新计数：又是 5 次 alpha，再一次 beta
+# 也就是说 beta 不是「等下一个推送」才补发，而是那一轮的第 6 次推送本身就是 beta。
 # 手动触发时可直接发 beta 或正式 release（release 同时打 git tag 并建 GitHub Release）。
 #
 # 前置配置（仓库 Settings → Secrets and variables → Actions）：
@@ -43,6 +46,8 @@ jobs:
       channel: ${{ steps.derive.outputs.channel }}
       seq: ${{ steps.derive.outputs.seq }}
       alpha_total: ${{ steps.derive.outputs.alpha_total }}
+      since: ${{ steps.derive.outputs.since }}
+      cycle_alphas: ${{ steps.derive.outputs.cycle_alphas }}
       nodes: ${{ steps.derive.outputs.nodes }}
     steps:
       - name: checkout repository
@@ -67,18 +72,31 @@ jobs:
 
           # alpha 计数：alpha-N 是每次自动发布的序号，beta-N 记着「定版时已有多少个 alpha」
           alpha_total=$(git tag -l 'alpha-*' | wc -l | tr -d ' ')
-          last_beta=$(git tag -l 'beta-*' | sed 's/^beta-//' | sort -n | tail -1)
+          last_beta=$(git tag -l 'beta-*' | sed 's/^beta-//' | grep -E '^[0-9]+$' | sort -n | tail -1)
           last_beta=${last_beta:-0}
           seq=$((alpha_total + 1))
 
           if [ -n "${CHANNEL_INPUT}" ]; then
             channel="${CHANNEL_INPUT}"
           elif [ $((alpha_total - last_beta)) -ge 5 ]; then
-            # 上次定版之后已经攒够 5 个 alpha，这一轮就出 beta
+            # 上一轮结束后已经攒了 5 个 alpha，那么这一次推送本身就是第 6 次 → 直接出 beta
             channel=beta
           else
             channel=alpha
           fi
+
+          # beta 的更新说明要覆盖「整轮」而不只是最后一次推送，所以起点是上一个定版点：
+          # beta tag 打在 beta 那次构建的提交上，正好可以当下一个周期的起点。
+          if [ "$last_beta" -gt 0 ]; then
+            since=$(git rev-parse "beta-${last_beta}^{commit}")
+          else
+            # 还没有过 beta：从第一次 alpha 之前算起（alpha-1 是首个提交时留空，退化为全量）
+            since=$(git rev-parse -q --verify "alpha-1^" || echo "")
+          fi
+
+          # 本轮已经发出去的 alpha，用来在 beta 的说明里写清「汇总了哪几次」
+          cycle_alphas=$(git tag -l 'alpha-*' | sed 's/^alpha-//' | sort -n \
+            | awk -v n="$last_beta" '$1 > n { printf "%salpha-%s", (c++ ? ", " : ""), $1 }')
 
           base=$(sed -n 's/^mod.version=//p' gradle.properties | head -1)
           if [ "$channel" = "release" ]; then
@@ -93,7 +111,10 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "seq=${seq}" >> "$GITHUB_OUTPUT"
           echo "alpha_total=${alpha_total}" >> "$GITHUB_OUTPUT"
+          echo "since=${since}" >> "$GITHUB_OUTPUT"
+          echo "cycle_alphas=${cycle_alphas}" >> "$GITHUB_OUTPUT"
           echo "现有 alpha ${alpha_total} 个，上次定版在 ${last_beta}；本次发布 ${channel}，版本号 ${version}"
+          echo "本轮 alpha：${cycle_alphas:-（无）}；汇总起点：${since:-（全量历史）}"
 
   build:
     needs: prepare
@@ -133,6 +154,9 @@ jobs:
           NODES: ${{ needs.prepare.outputs.nodes }}
           BASE_VERSION: ${{ needs.prepare.outputs.version }}
           CHANNEL: ${{ needs.prepare.outputs.channel }}
+          SINCE: ${{ needs.prepare.outputs.since }}
+          CYCLE_ALPHAS: ${{ needs.prepare.outputs.cycle_alphas }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           mkdir -p dist
           for node in $(echo "$NODES" | tr -d '[]"' | tr ',' ' '); do
@@ -148,26 +172,77 @@ jobs:
           notes=".github/release-notes-v${BASE_VERSION}.md"
           if [ "$CHANNEL" = "release" ] && [ -f "$notes" ]; then
             cp "$notes" dist/changelog.md
-          else
-            {
-              case "$CHANNEL" in
-                alpha) echo "自动构建的 alpha 版本，对应提交 \`${GITHUB_SHA::7}\`。" ;;
-                beta)  echo "由最近 5 个 alpha 汇总而来的 beta，对应提交 \`${GITHUB_SHA::7}\`，供定版前验证。" ;;
-                *)     echo "构建自提交 \`${GITHUB_SHA::7}\`。" ;;
-              esac
-              echo
-              if [ -n "${{ github.event.before }}" ] && git rev-parse --verify --quiet "${{ github.event.before }}" >/dev/null; then
-                git log --pretty='- %s（`%h`）' "${{ github.event.before }}..HEAD"
-              else
-                git log --pretty='- %s（`%h`）' -1
-              fi
-              echo
-              if [ "$CHANNEL" = "beta" ]; then
-                echo "> 这次 beta 覆盖上一次 beta 之后累积的 5 个 alpha；alpha 与 beta 都会留在版本列表里。"
-              fi
-              echo "> 每个游戏版本一个 jar，请装与游戏版本对应的那个。"
-            } > dist/changelog.md
+            exit 0
           fi
+
+          # 按提交类型分组，一堆平铺的标题读不出「这一轮到底改了什么」
+          grouped() {
+            awk -F'\t' '
+              {
+                s = $1; h = $2; k = "other"
+                if (s ~ /^(feat|add)[:：]/ || s ~ /^新增/) k = "feat"
+                else if (s ~ /^(fix|修复)[:：]/ || s ~ /^修复/) k = "fix"
+                else if (s ~ /^(ci|build|chore|docs|refactor|style|test|license|重构|调整|文档|构建)[:：]/) k = "meta"
+                bucket[k] = bucket[k] "\n- " s " (`" h "`)"
+              }
+              END {
+                n = 0
+                if (bucket["feat"] != "") { print (n++ ? "\n" : "") "### New features" bucket["feat"] }
+                if (bucket["fix"] != "") { print (n++ ? "\n" : "") "### Fixes" bucket["fix"] }
+                if (bucket["meta"] != "") { print (n++ ? "\n" : "") "### Maintenance" bucket["meta"] }
+                if (bucket["other"] != "") { print (n++ ? "\n" : "") "### Other changes" bucket["other"] }
+              }'
+          }
+
+          # 把一段提交范围渲染成分组列表；没有提交时给一句兜底，免得更新说明只剩两句空话
+          emit() {
+            entries=$(git log --pretty='%s%x09%h' "$1")
+            if [ -z "$entries" ]; then
+              echo "- 本次没有新的提交。"
+              return
+            fi
+            printf '%s\n' "$entries" | grouped
+          }
+
+          {
+            case "$CHANNEL" in
+              alpha)
+                echo "自动构建的 alpha，对应提交 \`${GITHUB_SHA::7}\`。"
+                echo
+                # alpha 只讲这一次推送
+                if [ -n "$PUSH_BEFORE" ] && git rev-parse --verify --quiet "$PUSH_BEFORE" >/dev/null; then
+                  emit "$PUSH_BEFORE..HEAD"
+                else
+                  emit -1
+                fi
+                ;;
+              beta)
+                # beta 是这个周期的第 6 次推送，说明要给整轮（6 次推送）而不是只有最后一条
+                if [ -n "$CYCLE_ALPHAS" ]; then
+                  echo "定版候选：这一轮的第 6 次推送。汇总此前 $(echo "$CYCLE_ALPHAS" | tr ',' '\n' | wc -l | tr -d ' ') 个 alpha（$CYCLE_ALPHAS）加上本次的全部改动，对应提交 \`${GITHUB_SHA::7}\`。"
+                else
+                  echo "定版候选，汇总上次定版以来的全部改动，对应提交 \`${GITHUB_SHA::7}\`。"
+                fi
+                echo
+                if [ -n "$SINCE" ]; then
+                  emit "${SINCE}..HEAD"
+                else
+                  emit ""
+                fi
+                ;;
+              *)
+                echo "构建自提交 \`${GITHUB_SHA::7}\`。"
+                echo
+                emit -1
+                ;;
+            esac
+            echo
+            if [ "$CHANNEL" = "beta" ]; then
+              echo "> 这是候选版：装进整合包跑一轮，没问题就在 Actions 里手动触发一次 \`release\`，正式版从这里出。"
+            fi
+            echo "> 每个游戏版本一个 jar，请装与游戏版本对应的那个；alpha 与 beta 都留在版本列表里。"
+          } > dist/changelog.md
+          cat dist/changelog.md
       - name: capture jars
         uses: actions/upload-artifact@v7
         with:
@@ -253,7 +328,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # 只在发布成功后记账：alpha-N 让下一次知道攒到第几个了，
-  # beta-N 记下「定版时已有 N 个 alpha」，下一次从 N 重新攒 5 个。
+  # beta-N 记下「定版时已有 N 个 alpha」，下一次从 N 重新攒 5 个；
+  # beta tag 同时打在该次构建的提交上，正好当下一轮 beta 更新说明的起点。
   # 这些 tag 只用于计数，不发布任何东西，也不会再触发本工作流。
   count:
     needs: [prepare, publish]
